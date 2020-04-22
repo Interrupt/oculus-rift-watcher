@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"fmt"
 	"log"
 	"os"
 	"time"
@@ -17,6 +18,8 @@ import (
 type OculusWatcher struct {
 	WatchUrl string
 	WaitTime time.Duration
+
+	ChromeContext context.Context
 }
 
 func main() {
@@ -25,19 +28,46 @@ func main() {
 		WaitTime: 3 * time.Second,
 	}
 
-	ctx, cancel := chromedp.NewContext(context.Background())
-	defer cancel()
+	log.Printf("Starting in stock watcher for %s", watcher.WatchUrl)
 
+	// Start the initial context
+	ctx, cancel := chromedp.NewContext(context.Background())
+
+	// Loop forever!
 	for {
-		found := watcher.CheckForStock(ctx)
-		if found {
-			log.Println("Oculus Rift S found in stock!")
-			PlayAlertSound()
-			continue
+		err := watcher.CheckStockWithTimeout(ctx)
+
+		if err != nil {
+			log.Printf("Error: %+v", err)
+			cancel()
+
+			// Start a new context, something bad happened with the old one
+			ctx, cancel = chromedp.NewContext(context.Background())
 		}
 
 		time.Sleep(watcher.WaitTime)
 	}
+}
+
+func (w *OculusWatcher) CheckStockWithTimeout(ctx context.Context) error {
+	watcherChannel := make(chan bool, 1)
+
+	go func() {
+		found := w.CheckForStock(ctx)
+		watcherChannel <- found
+	}()
+
+	select {
+	case found := <-watcherChannel:
+		if found {
+			log.Printf(" - Go now: %s", w.WatchUrl)
+			PlayAlertSound()
+		}
+	case <-time.After(10 * time.Second):
+		return fmt.Errorf("Timed out waiting for results.")
+	}
+
+	return nil
 }
 
 func (w *OculusWatcher) CheckForStock(ctx context.Context) bool {
@@ -53,26 +83,31 @@ func (w *OculusWatcher) CheckForStock(ctx context.Context) bool {
 	err := chromedp.Run(ctx, tasks)
 	if err != nil {
 		log.Println(err)
-	}
-
-	log.Printf("Not in stock yet. Button text: %s", res)
-
-	if res == "Notify Me" {
 		return false
 	}
 
+	if res == "Notify Me" {
+		log.Printf("Not in stock. Button text: %s", res)
+		return false
+	}
+
+	// Woohoo! In stock hopefully
+	log.Printf("Oculus Rift S found in stock! Button Text: %s", res)
 	return true
 }
 
 func PlayAlertSound() {
 	f, err := os.Open("alert.mp3")
 	if err != nil {
-		log.Fatal(err)
+		log.Printf("Error: Could not open alert sound.")
+		return
 	}
+	defer f.Close()
 
 	streamer, format, err := mp3.Decode(f)
 	if err != nil {
-		log.Fatal(err)
+		log.Printf("Error: Could not decode alert mp3")
+		return
 	}
 	defer streamer.Close()
 
